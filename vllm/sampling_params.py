@@ -56,6 +56,9 @@ class SamplingParams:
         ignore_eos: bool = False,
         max_tokens: int = 16,
         logprobs: Optional[int] = None,
+        return_full_text: bool = False,
+        details: bool = False,
+        **kwargs
     ) -> None:
         self.n = n
         self.best_of = best_of if best_of is not None else n
@@ -81,6 +84,8 @@ class SamplingParams:
         elif self.temperature < _SAMPLING_EPS:
             # Zero temperature means greedy sampling.
             self._verify_greedy_sampling()
+        self.return_full_text = return_full_text
+        self.details = details
 
     def _verify_args(self) -> None:
         if self.n < 1:

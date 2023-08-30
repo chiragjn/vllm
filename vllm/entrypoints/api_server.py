@@ -8,6 +8,7 @@ import uvicorn
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 
@@ -25,16 +26,33 @@ async def generate(request: Request) -> Response:
     - stream: whether to stream the results or not.
     - other fields: the sampling parameters (See `SamplingParams` for details).
     """
+    
     request_dict = await request.json()
-    prompt = request_dict.pop("prompt")
-    stream = request_dict.pop("stream", False)
-    sampling_params = SamplingParams(**request_dict)
+    if "prompt" in request_dict:
+        request_format = "vllm"
+        prompt = request_dict.pop("prompt")
+        stream = request_dict.pop("stream", False)
+        sampling_params = SamplingParams(**request_dict)
+    elif "inputs" in request_dict:
+        request_format = "tgi"
+        prompt = request_dict.pop("inputs")
+        stream = request_dict.pop("stream", False)
+        sampling_params = request_dict.pop("parameters") or {}
+        if "max_new_tokens" in sampling_params:
+            sampling_params["max_tokens"] = sampling_params.pop("max_new_tokens")
+        if "n" in sampling_params and sampling_params["n"] > 1:
+            return JSONResponse({"error": "n cannot be greater than 1"}, status_code=400)
+        sampling_params = SamplingParams(**sampling_params)
+    else:
+        request_format = "unknown"
+
     request_id = random_uuid()
     results_generator = engine.generate(prompt, sampling_params, request_id)
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
         async for request_output in results_generator:
+            # TODO (chiragjn): Fix compatibility here!
             prompt = request_output.prompt
             text_outputs = [
                 prompt + output.text for output in request_output.outputs
@@ -62,8 +80,26 @@ async def generate(request: Request) -> Response:
 
     assert final_output is not None
     prompt = final_output.prompt
-    text_outputs = [prompt + output.text for output in final_output.outputs]
-    ret = {"text": text_outputs}
+
+    if request_format == "vllm":
+        text_outputs = [prompt + output.text for output in final_output.outputs]
+        ret = {"text": text_outputs}
+    elif request_format == "tgi":
+        ret = {}
+        output: CompletionOutput = final_output.outputs[0]
+        generated_text = output.text
+        if sampling_params.return_full_text:
+            generated_text = prompt + output.text
+        ret["generated_text"] = generated_text
+
+        details = {}
+        if sampling_params.details:
+            details["finish_reason"] = output.finish_reason
+            details["generated_tokens"] = len(output.token_ids)
+            # TODO (chiragjn): prefill and tokens is missing
+            ret["details"] = details
+    else:
+        return JSONResponse({"error": "Unknown request format"}, status_code=400)
     return JSONResponse(ret)
 
 
